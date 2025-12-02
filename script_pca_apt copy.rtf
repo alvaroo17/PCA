@@ -1,0 +1,190 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2639
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww28600\viewh15400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 import pandas as pd\
+import numpy as np\
+import matplotlib.pyplot as plt\
+from sklearn.decomposition import PCA\
+\
+# ==========================\
+# CONFIGURACI\'d3N B\'c1SICA\
+# ==========================\
+\
+\
+DATA_PATH = "returns_20_stocks.csv"\
+\
+DATE_COL = "Date"   # o None si no tienes fecha\
+\
+EXCLUDE_COLS = ["RF", "Benchmark", "Bm", "Market"]\
+\
+\
+N_FACTORS = 5  # c\'e1mbialo a lo que decidas tras ver el elbow rule\
+\
+RISK_FREE_COL = None  # por ejemplo "RF". Si no tienes, deja None.\
+\
+\
+# ==========================\
+# CARGA Y PREPARACI\'d3N DE LOS DATOS\
+# ==========================\
+\
+# Cargar datos\
+df = pd.read_csv(DATA_PATH)\
+\
+if DATE_COL is not None and DATE_COL in df.columns:\
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL])\
+    df.set_index(DATE_COL, inplace=True)\
+\
+# Seleccionar solo columnas de activos (las 20 empresas)\
+asset_cols = [c for c in df.columns if c not in EXCLUDE_COLS]\
+returns = df[asset_cols].copy()\
+\
+# Si quieres trabajar con rentabilidades en exceso sobre RF:\
+if RISK_FREE_COL is not None and RISK_FREE_COL in df.columns:\
+    rf = df[RISK_FREE_COL].values.reshape(-1, 1)\
+    returns_excess = returns - rf\
+else:\
+    returns_excess = returns.copy()\
+\
+# Eliminamos filas con NaNs por seguridad\
+returns_excess = returns_excess.dropna()\
+\
+# Matriz T x N (tiempo x activos)\
+R = returns_excess.values\
+T, N = R.shape\
+print(f"N\'ba de observaciones: \{T\}, N\'ba de activos: \{N\}")\
+\
+\
+# ==========================\
+# PCA: LOADINGS, SCORES Y SCREE PLOT\
+# ==========================\
+\
+# Estandarizar rentabilidades (PCA sobre la matriz de correlaciones)\
+R_mean = R.mean(axis=0)\
+R_std = R.std(axis=0, ddof=1)\
+R_std[R_std == 0] = 1.0  # evitar divisi\'f3n por cero\
+\
+R_z = (R - R_mean) / R_std  # datos estandarizados\
+\
+# Ajustar PCA (tantos componentes como activos para poder ver todo el espectro)\
+pca = PCA(n_components=N)\
+pca.fit(R_z)\
+\
+# Scores (time series de los PCs)\
+scores = pca.transform(R_z)  # T x N\
+scores_df = pd.DataFrame(\
+    scores,\
+    index=returns_excess.index,\
+    columns=[f"PC\{i+1\}" for i in range(N)]\
+)\
+\
+# Loadings (pesos de cada activo en cada PC)\
+# En sklearn, components_ es K x N (PC x variable). Transponemos a N x K.\
+loadings = pca.components_.T\
+loadings_df = pd.DataFrame(\
+    loadings,\
+    index=asset_cols,\
+    columns=[f"PC\{i+1\}" for i in range(N)]\
+)\
+\
+# Guardar a CSV\
+scores_df.to_csv("pca_scores.csv")\
+loadings_df.to_csv("pca_loadings.csv")\
+\
+print("Guardados: pca_scores.csv y pca_loadings.csv")\
+\
+# Scree plot (elbow rule)\
+explained_var_ratio = pca.explained_variance_ratio_\
+\
+plt.figure()\
+plt.plot(range(1, N+1), explained_var_ratio, marker="o")\
+plt.xlabel("N\'famero de componentes principales")\
+plt.ylabel("Varianza explicada (proporci\'f3n)")\
+plt.title("Scree plot (Elbow rule) PCA")\
+plt.grid(True)\
+plt.tight_layout()\
+plt.savefig("pca_scree_plot.png", dpi=300)\
+plt.close()\
+print("Guardado: pca_scree_plot.png")\
+\
+\
+# ==========================\
+# APT: BETAS (COEFICIENTES) Y PRECIOS DE LOS FACTORES (LAMBDA)\
+# ==========================\
+\
+# Elegimos los primeros N_FACTORS PCs como factores del APT\
+factors = scores_df.iloc[:, :N_FACTORS].copy()  # T x K\
+F = factors.values  # T x K\
+\
+# 1) Betas de cada activo a cada PC (regresi\'f3n temporal: Ri_t = alpha_i + beta_iF * F_t + eps)\
+betas = np.zeros((N, N_FACTORS))\
+alphas = np.zeros(N)\
+\
+# A\'f1adimos columna de unos para el intercepto\
+X = np.column_stack([np.ones(T), F])  # T x (1+K)\
+\
+for j in range(N):\
+    y = R[:, j]  # rentabilidad del activo j\
+    # OLS por m\'ednimos cuadrados\
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)\
+    alphas[j] = coef[0]\
+    betas[j, :] = coef[1:]\
+\
+betas_df = pd.DataFrame(\
+    betas,\
+    index=asset_cols,\
+    columns=[f"Beta_PC\{i+1\}" for i in range(N_FACTORS)]\
+)\
+alphas_df = pd.DataFrame(\
+    alphas,\
+    index=asset_cols,\
+    columns=["Alpha"]\
+)\
+\
+betas_df.to_csv("apt_betas.csv")\
+alphas_df.to_csv("apt_alphas.csv")\
+print("Guardados: apt_betas.csv y apt_alphas.csv")\
+\
+# 2) Precios de los factores (lambda) via regresi\'f3n transversal:\
+#   E[R_i] = a + sum_k beta_\{ik\} * lambda_k + error_i\
+\
+mean_returns = R.mean(axis=0)  # media de cada activo (T x N -> N)\
+mean_returns_df = pd.Series(mean_returns, index=asset_cols, name="Mean_Return")\
+\
+# Matriz de dise\'f1o para regresi\'f3n transversal: N activos x (1 + K factores)\
+X_cs = np.column_stack([np.ones(N), betas])  # N x (1+K)\
+y_cs = mean_returns  # N\
+\
+lambda_coef, *_ = np.linalg.lstsq(X_cs, y_cs, rcond=None)\
+alpha_cs = lambda_coef[0]\
+lambdas = lambda_coef[1:]  # precios de los factores\
+\
+lambdas_df = pd.DataFrame(\
+    lambdas,\
+    index=[f"PC\{i+1\}" for i in range(N_FACTORS)],\
+    columns=["Lambda"]\
+)\
+\
+lambdas_df.to_csv("apt_lambdas.csv")\
+print("Guardado: apt_lambdas.csv")\
+print("\\nPrecios de los factores (lambda):")\
+print(lambdas_df)\
+\
+# ==========================\
+# RESUMEN EN PANTALLA\
+# ==========================\
+\
+print("\\nVarianza explicada por los primeros componentes:")\
+for i, vr in enumerate(explained_var_ratio[:N_FACTORS], start=1):\
+    print(f"PC\{i\}: \{vr:.4f\}")\
+\
+print("\\nPrimeras filas de los loadings:")\
+print(loadings_df.iloc[:, :N_FACTORS].head())\
+\
+print("\\nPrimeras filas de los betas APT:")\
+print(betas_df.head())\
+\
+}
